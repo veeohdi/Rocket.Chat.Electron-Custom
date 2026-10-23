@@ -71,6 +71,157 @@ if (navigator.clipboard) {
 // `window.require` (the Vite client).
 console.log('[Rocket.Chat Desktop] Injected.ts replaced Notification');
 
+type PendingThreadReply = {
+  rid?: string;
+  tmid: string;
+  replyText: string;
+  timestamp: number;
+};
+
+const pendingThreadReplies: PendingThreadReply[] = [];
+
+const registerPendingThreadReply = (
+  rid: string | undefined,
+  tmid: string,
+  replyText: string
+): void => {
+  const now = Date.now();
+  for (let i = pendingThreadReplies.length - 1; i >= 0; i--) {
+    if (now - pendingThreadReplies[i].timestamp > 30000) {
+      pendingThreadReplies.splice(i, 1);
+    }
+  }
+  pendingThreadReplies.push({ rid, tmid, replyText, timestamp: now });
+};
+
+const findAndApplyThreadReply = (msgObj: Record<string, any>): boolean => {
+  if (!msgObj || typeof msgObj !== 'object') {
+    return false;
+  }
+  if (msgObj.tmid) {
+    return false;
+  }
+
+  const now = Date.now();
+  for (let i = pendingThreadReplies.length - 1; i >= 0; i--) {
+    const pending = pendingThreadReplies[i];
+    if (now - pending.timestamp > 30000) {
+      pendingThreadReplies.splice(i, 1);
+      continue;
+    }
+
+    const matchesRoom = !pending.rid || pending.rid === msgObj.rid;
+    const matchesText =
+      msgObj.msg === pending.replyText || msgObj.text === pending.replyText;
+
+    if (matchesRoom && matchesText) {
+      msgObj.tmid = pending.tmid;
+      pendingThreadReplies.splice(i, 1);
+      console.log(
+        '[Rocket.Chat Desktop] Attached tmid to notification reply:',
+        pending.tmid
+      );
+      return true;
+    }
+  }
+
+  // Fallback: If sent to the same room within 5 seconds of the notification reply
+  for (let i = pendingThreadReplies.length - 1; i >= 0; i--) {
+    const pending = pendingThreadReplies[i];
+    if (now - pending.timestamp < 5000) {
+      const matchesRoom = !pending.rid || pending.rid === msgObj.rid;
+      if (matchesRoom) {
+        msgObj.tmid = pending.tmid;
+        pendingThreadReplies.splice(i, 1);
+        console.log(
+          '[Rocket.Chat Desktop] Attached tmid (time-window match) to notification reply:',
+          pending.tmid
+        );
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+const extractThreadInfo = (notif: any): { rid?: string; tmid?: string } => {
+  const payload =
+    notif?.payload ||
+    notif?.data?.payload ||
+    notif?.data ||
+    notif?.options?.payload ||
+    notif?.options?.data;
+  const rid = payload?.rid || notif?.rid;
+  const tmid = payload?.tmid || notif?.tmid;
+  return { rid, tmid };
+};
+
+// Intercept outgoing fetch calls to ensure notification replies include tmid
+if (typeof window.fetch === 'function') {
+  const originalFetch = window.fetch;
+  window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
+    if (init && typeof init.body === 'string') {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        url &&
+        (url.includes('chat.sendMessage') || url.includes('chat.postMessage'))
+      ) {
+        try {
+          const parsed = JSON.parse(init.body);
+          if (parsed && typeof parsed === 'object') {
+            if (parsed.message && typeof parsed.message === 'object') {
+              if (findAndApplyThreadReply(parsed.message)) {
+                init.body = JSON.stringify(parsed);
+              }
+            } else if (parsed.rid || parsed.msg || parsed.text) {
+              if (findAndApplyThreadReply(parsed)) {
+                init.body = JSON.stringify(parsed);
+              }
+            }
+          }
+        } catch {
+          // Ignore JSON parse errors
+        }
+      }
+    }
+    return originalFetch.apply(this, arguments as any);
+  };
+}
+
+// Intercept outgoing XMLHttpRequest calls to ensure notification replies include tmid
+if (typeof window.XMLHttpRequest === 'function') {
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (
+    body?: Document | XMLHttpRequestBodyInit | null
+  ) {
+    if (typeof body === 'string') {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object') {
+          if (parsed.message && typeof parsed.message === 'object') {
+            if (findAndApplyThreadReply(parsed.message)) {
+              body = JSON.stringify(parsed);
+            }
+          } else if (parsed.rid || parsed.msg || parsed.text) {
+            if (findAndApplyThreadReply(parsed)) {
+              body = JSON.stringify(parsed);
+            }
+          }
+        }
+      } catch {
+        // Ignore JSON parse errors
+      }
+    }
+    return originalSend.call(this, body);
+  };
+}
+
 window.Notification = class RocketChatDesktopNotification
   extends EventTarget
   implements Notification
@@ -242,6 +393,14 @@ window.Notification = class RocketChatDesktopNotification
 
     if (isReplyEvent(type, detail)) {
       (mainWorldEvent as any).response = detail.reply;
+      const { rid, tmid } = extractThreadInfo(this);
+      if (tmid) {
+        (mainWorldEvent as any).tmid = tmid;
+        if (rid) {
+          (mainWorldEvent as any).rid = rid;
+        }
+        registerPendingThreadReply(rid, tmid, detail.reply);
+      }
     }
 
     if (type === 'action') {
@@ -473,6 +632,19 @@ const start = async () => {
   moduleLoads.push(
     loadModule('meteor/meteor', 'Meteor', (value) => {
       Meteor = value.Meteor;
+      if (Meteor && typeof Meteor.call === 'function') {
+        const originalMeteorCall = Meteor.call;
+        Meteor.call = function (name: string, ...args: any[]) {
+          if (
+            name === 'sendMessage' &&
+            args[0] &&
+            typeof args[0] === 'object'
+          ) {
+            findAndApplyThreadReply(args[0]);
+          }
+          return originalMeteorCall.apply(this, [name, ...args]);
+        };
+      }
     }),
     loadModule('meteor/session', 'Session', (value) => {
       Session = value.Session;

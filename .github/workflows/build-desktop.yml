@@ -1,0 +1,144 @@
+name: ⚡ Build Rocket.Chat Desktop (Windows & Mac)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 🪟 Build Windows Installer (.exe)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: ⚙️ Enable Corepack & Setup Yarn
+        run: corepack enable
+
+      - name: 📦 Install Dependencies
+        run: yarn install
+
+      - name: 🔨 Compile Application (Rollup)
+        run: yarn build
+        env:
+          NODE_ENV: production
+
+      - name: 📦 Package Windows NSIS Installer (.exe)
+        run: |
+          yarn electron-builder --win nsis --x64 -c.win.signAndEditExecutable=false -c.win.verifyUpdateCodeSignature=false --publish never
+        env:
+          NODE_ENV: production
+
+      - name: 📤 Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RocketChat-Windows-Setup
+          path: dist/*.exe
+          retention-days: 7
+
+  build-mac:
+    name: 🍎 Build macOS Installer (.dmg)
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: ⚙️ Enable Corepack & Setup Yarn
+        run: corepack enable
+
+      - name: 📦 Install Dependencies
+        run: yarn install
+
+      - name: 🔨 Compile Application (Rollup)
+        run: yarn build
+        env:
+          NODE_ENV: production
+
+      - name: 📦 Package macOS Universal DMG (.dmg)
+        run: |
+          yarn electron-builder --mac dmg --universal -c.mac.identity=null -c.mac.provisioningProfile=null -c.mac.hardenedRuntime=false --publish never
+        env:
+          NODE_ENV: production
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: 📤 Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RocketChat-macOS-Universal-DMG
+          path: dist/*.dmg
+          retention-days: 7
+
+  create-release:
+    name: 🚀 Publish Public GitHub Release
+    needs: [build-windows, build-mac]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RocketChat-Windows-Setup
+          path: release-artifacts/windows
+
+      - name: 📥 Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RocketChat-macOS-Universal-DMG
+          path: release-artifacts/mac
+
+      - name: 📋 List Release Files
+        run: ls -laR release-artifacts/
+
+      - name: 🏷️ Generate Release Tag
+        id: tag_name
+        run: |
+          TAG="build-${{ github.run_number }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: 📦 Create Public GitHub Release with Direct Downloads
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag_name.outputs.tag }}
+          name: "⚡ Rocket.Chat Desktop Custom Build #${{ github.run_number }} (Windows & macOS)"
+          body: |
+            ## ⚡ Rocket.Chat Desktop - Notification Thread Reply Build
+
+            This desktop release is built directly from official Rocket.Chat Desktop sources with the following single enhancement:
+            * **Thread Reply Routing:** Replies submitted directly from Windows Toast / Action Center and macOS Notification Banners always post directly into their respective threads, instead of dumping into the general channel.
+            * **Official App Parity:** All other functionality, UI, themes, settings, and features are 100% identical to the official Rocket.Chat desktop client.
+
+            ### 📥 Direct Downloads:
+            * **Windows 10 / 11:** Download the `.exe` setup installer below.
+            * **macOS (Apple Silicon M1/M2/M3/M4 & Intel Universal):** Download the `.dmg` installer below.
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/windows/*.exe
+            release-artifacts/mac/*.dmg
+          token: ${{ secrets.GITHUB_TOKEN }}
