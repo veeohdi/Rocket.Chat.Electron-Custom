@@ -11,8 +11,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: build-desktop-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-desktop-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -45,7 +45,7 @@ jobs:
 
       - name: 📦 Package Windows NSIS Installer (.exe)
         run: |
-          yarn electron-builder --win nsis --x64 -c.win.signAndEditExecutable=false -c.win.verifyUpdateCodeSignature=false --publish never
+          yarn electron-builder --win nsis --x64 --publish never
         env:
           NODE_ENV: production
 
@@ -83,7 +83,7 @@ jobs:
 
       - name: 📦 Package macOS Universal DMG (.dmg)
         run: |
-          yarn electron-builder --mac dmg --universal -c.mac.identity=null -c.mac.provisioningProfile=null -c.mac.hardenedRuntime=false --publish never
+          yarn electron-builder --mac dmg --universal --publish never
         env:
           NODE_ENV: production
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
